@@ -15,18 +15,26 @@ import random as python_random
 # import torchvision.datasets as dsets
 
 # BERT
-import bert.tokenization as tokenization
-from bert.modeling import BertConfig, BertModel
+#import bert.tokenization as tokenization
+#from bert.modeling import BertConfig, BertModel
+from transformers import BertModel, BertConfig, BertTokenizer
 
 from sqlova.utils.utils_wikisql import *
 from sqlova.utils.utils import load_jsonl
 from sqlova.model.nl2sql.wikisql_models import *
 from sqlnet.dbengine import DBEngine
 
+from tqdm import tqdm
+# from apex import amp
+
+# amp.register_float_function(torch, "sigmoid")
+# amp.init()
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def construct_hyper_param(parser):
+    parser.add_argument("--half", default=False, action='store_true')
     parser.add_argument("--do_train", default=False, action='store_true')
     parser.add_argument('--do_infer', default=False, action='store_true')
     parser.add_argument('--infer_loop', default=False, action='store_true')
@@ -113,24 +121,33 @@ def construct_hyper_param(parser):
     return args
 
 
+# FIXME: use huggingface/transformers instead
+#def get_bert(BERT_PT_PATH, bert_type, do_lower_case, no_pretraining):
+#    bert_config_file = os.path.join(BERT_PT_PATH, f'bert_config_{bert_type}.json')
+#    vocab_file = os.path.join(BERT_PT_PATH, f'vocab_{bert_type}.txt')
+#    init_checkpoint = os.path.join(BERT_PT_PATH, f'pytorch_model_{bert_type}.bin')
+#
+#    bert_config = BertConfig.from_json_file(bert_config_file)
+#    tokenizer = tokenization.FullTokenizer(
+#        vocab_file=vocab_file, do_lower_case=do_lower_case)
+#    bert_config.print_status()
+#
+#    model_bert = BertModel(bert_config)
+#    if no_pretraining:
+#        pass
+#    else:
+#        model_bert.load_state_dict(torch.load(init_checkpoint, map_location='cpu'))
+#        print("Load pre-trained parameters.")
+#    model_bert.to(device)
+#
+#    return model_bert, tokenizer, bert_config
+
+# always use pretrained bert-base-uncased
 def get_bert(BERT_PT_PATH, bert_type, do_lower_case, no_pretraining):
-    bert_config_file = os.path.join(BERT_PT_PATH, f'bert_config_{bert_type}.json')
-    vocab_file = os.path.join(BERT_PT_PATH, f'vocab_{bert_type}.txt')
-    init_checkpoint = os.path.join(BERT_PT_PATH, f'pytorch_model_{bert_type}.bin')
-
-    bert_config = BertConfig.from_json_file(bert_config_file)
-    tokenizer = tokenization.FullTokenizer(
-        vocab_file=vocab_file, do_lower_case=do_lower_case)
-    bert_config.print_status()
-
-    model_bert = BertModel(bert_config)
-    if no_pretraining:
-        pass
-    else:
-        model_bert.load_state_dict(torch.load(init_checkpoint, map_location='cpu'))
-        print("Load pre-trained parameters.")
-    model_bert.to(device)
-
+    bert_type = "bert-base-uncased"
+    model_bert = BertModel.from_pretrained(bert_type, output_hidden_states=True).to(device)
+    tokenizer = BertTokenizer.from_pretrained(bert_type)
+    bert_config = model_bert.config
     return model_bert, tokenizer, bert_config
 
 
@@ -207,7 +224,7 @@ def get_data(path_wikisql, args):
 
 def train(train_loader, train_table, model, model_bert, opt, bert_config, tokenizer,
           max_seq_length, num_target_layers, accumulate_gradients=1, check_grad=True,
-          st_pos=0, opt_bert=None, path_db=None, dset_name='train'):
+          st_pos=0, opt_bert=None, path_db=None, dset_name='train', half=False):
     model.train()
     model_bert.train()
 
@@ -224,9 +241,10 @@ def train(train_loader, train_table, model, model_bert, opt, bert_config, tokeni
     cnt_x = 0  # of execution acc
 
     # Engine for SQL querying.
+    # import pdb; pdb.set_trace()
     engine = DBEngine(os.path.join(path_db, f"{dset_name}.db"))
 
-    for iB, t in enumerate(train_loader):
+    for iB, t in tqdm(enumerate(train_loader)):
         cnt += len(t)
 
         if cnt < st_pos:
@@ -270,9 +288,10 @@ def train(train_loader, train_table, model, model_bert, opt, bert_config, tokeni
                                                    g_sc=g_sc, g_sa=g_sa, g_wn=g_wn, g_wc=g_wc, g_wvi=g_wvi)
 
         # Calculate loss & step
+        # import pdb; pdb.set_trace()
         loss = Loss_sw_se(s_sc, s_sa, s_wn, s_wc, s_wo, s_wv, g_sc, g_sa, g_wn, g_wc, g_wo, g_wvi)
 
-        # Calculate gradient
+        # # Calculate gradient
         if iB % accumulate_gradients == 0:  # mode
             # at start, perform zero_grad
             opt.zero_grad()
@@ -292,6 +311,13 @@ def train(train_loader, train_table, model, model_bert, opt, bert_config, tokeni
         else:
             # at intermediate stage, just accumulates the gradients
             loss.backward()
+        # if half:
+        #     with amp.scale_loss(loss, [opt, opt_bert]) as scaled_loss:
+        #         scaled_loss.backward()
+        # else:
+        #     loss.backward()
+        # opt.step()
+        # opt_bert.step()
 
         # Prediction
         pr_sc, pr_sa, pr_wn, pr_wc, pr_wo, pr_wvi = pred_sw_se(s_sc, s_sa, s_wn, s_wc, s_wo, s_wv, )
@@ -399,7 +425,7 @@ def report_detail(hds, nlu,
 def test(data_loader, data_table, model, model_bert, bert_config, tokenizer,
          max_seq_length,
          num_target_layers, detail=False, st_pos=0, cnt_tot=1, EG=False, beam_size=4,
-         path_db=None, dset_name='test'):
+         path_db=None, dset_name='test', half=False):
     model.eval()
     model_bert.eval()
 
@@ -434,6 +460,11 @@ def test(data_loader, data_table, model, model_bert, bert_config, tokenizer,
         nlu_tt, t_to_tt_idx, tt_to_t_idx \
             = get_wemb_bert(bert_config, model_bert, tokenizer, nlu_t, hds, max_seq_length,
                             num_out_layers_n=num_target_layers, num_out_layers_h=num_target_layers)
+
+        # if half:
+        #     wemb_n = wemb_n.half()
+        #     wemb_h = wemb_h.half()
+
         try:
             g_wvi = get_g_wvi_bert_from_g_wvi_corenlp(t_to_tt_idx, g_wvi_corenlp)
             g_wv_str, g_wv_str_wp = convert_pr_wvi_to_string(g_wvi, nlu_t, nlu_tt, tt_to_t_idx, nlu)
@@ -646,7 +677,7 @@ if __name__ == '__main__':
 
     ## 2. Paths
     path_h = './data_and_model'  # '/home/wonseok'
-    path_wikisql = './data_and_model'  # os.path.join(path_h, 'data', 'wikisql_tok')
+    path_wikisql = './data_and_model/wikisql_tok'  # os.path.join(path_h, 'data', 'wikisql_tok')
     BERT_PT_PATH = path_wikisql
 
     path_save_for_evaluation = './'
@@ -672,9 +703,19 @@ if __name__ == '__main__':
         model, model_bert, tokenizer, bert_config = get_models(args, BERT_PT_PATH, trained=True,
                                                                path_model_bert=path_model_bert, path_model=path_model)
 
+    ## 4.5. Use fp16 for training
+    #if args.half:
+    #    model = model.half()
+    #    model_bert = model_bert.half()
+
     ## 5. Get optimizers
     if args.do_train:
         opt, opt_bert = get_opt(model, model_bert, args.fine_tune)
+        
+        # 5.5 Use Apex to accelerate training
+        if args.half:
+            model, opt = amp.initialize(model, opt)
+            model_bert, opt_bert = amp.initialize(model_bert, opt_bert)
 
         ## 6. Train
         acc_lx_t_best = -1
@@ -694,7 +735,8 @@ if __name__ == '__main__':
                                              opt_bert=opt_bert,
                                              st_pos=0,
                                              path_db=path_wikisql,
-                                             dset_name='train')
+                                             dset_name='train',
+                                             half=args.half)
 
             # check DEV
             with torch.no_grad():
@@ -709,7 +751,8 @@ if __name__ == '__main__':
                                                       detail=False,
                                                       path_db=path_wikisql,
                                                       st_pos=0,
-                                                      dset_name='dev', EG=args.EG)
+                                                      dset_name='dev', EG=args.EG,
+                                                      half=args.half)
 
             print_result(epoch, acc_train, 'train')
             print_result(epoch, acc_dev, 'dev')

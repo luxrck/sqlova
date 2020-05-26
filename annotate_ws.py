@@ -5,7 +5,8 @@ from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser
 import os
 import records
 import ujson as json
-from stanza.nlp.corenlp import CoreNLPClient
+# from stanza.nlp.corenlp import CoreNLPClient
+from stanza.server import CoreNLPClient
 from tqdm import tqdm
 import copy
 from wikisql.lib.common import count_lines, detokenize
@@ -18,13 +19,14 @@ client = None
 def annotate(sentence, lower=True):
     global client
     if client is None:
-        client = CoreNLPClient(default_annotators='ssplit,tokenize'.split(','))
+        # import pdb; pdb.set_trace()
+        client = CoreNLPClient(default_annotators='ssplit,tokenize'.split(','), be_quiet=True)
     words, gloss, after = [], [], []
-    for s in client.annotate(sentence):
-        for t in s:
-            words.append(t.word)
-            gloss.append(t.originalText)
-            after.append(t.after)
+    sent_annotated = client.annotate(sentence).sentence[0]
+    for t in sent_annotated.token:
+        words.append(t.word)
+        gloss.append(t.originalText)
+        after.append(t.after)
     if lower:
         words = [w.lower() for w in words]
     return {
